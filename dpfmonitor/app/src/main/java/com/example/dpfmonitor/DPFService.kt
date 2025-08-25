@@ -21,9 +21,16 @@ class DPFService : Service() {
     private var inStream: InputStream? = null
     private var outStream: OutputStream? = null
     private var running = false
+    private var activeRegenPid: String? = null
 
     private val TAG = "DPFService"
     private val UUID_OBD = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+    private val REGEN_PIDS = listOf(
+        "22F40B",
+        "22F487",
+        "22045B"
+    )
+
     private fun sendAlert(msg: String) {
         val prefs = PreferenceManager.getDefaultSharedPreferences(this)
         val debugMode = prefs.getBoolean("debug_mode", false)
@@ -33,9 +40,9 @@ class DPFService : Service() {
                 putExtra("MSG", msg)
             })
         }
-
-        Log.d(TAG, msg) // zawsze do logcat
+        Log.d(TAG, msg)
     }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Thread {
             val prefs = getSharedPreferences("com.example.dpfmonitor_preferences", MODE_PRIVATE)
@@ -64,7 +71,6 @@ class DPFService : Service() {
         return START_STICKY
     }
 
-    /** 🔹 Tryb symulacji danych bez Bluetooth */
     private fun runSimulation() {
         Thread {
             running = true
@@ -84,7 +90,7 @@ class DPFService : Service() {
                 val temp = if (regen) (550..650).random() else (250..400).random()
 
                 val intent = Intent("DPF_DATA").apply {
-                    putExtra("CONNECTED", true)   // ✅ widoczne jako "Połączono"
+                    putExtra("CONNECTED", true)
                     putExtra("SOOT", "$soot g")
                     putExtra("LOAD", "$load %")
                     putExtra("TEMP", "$temp °C")
@@ -98,16 +104,7 @@ class DPFService : Service() {
             }
         }.start()
     }
-    private fun drainInputStream() {
-        Thread.sleep(200)
-        try {
-            while (inStream?.available() ?: 0 > 0) {
-                inStream?.read()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Błąd czyszczenia strumienia: ${e.message}")
-        }
-    }
+
     private fun connectAndRead() {
         val prefs = getSharedPreferences("com.example.dpfmonitor_preferences", MODE_PRIVATE)
         val macAddress = prefs.getString("device_mac", null) ?: return
@@ -162,8 +159,8 @@ class DPFService : Service() {
 
             running = true
             while (running) {
-                readDPFData()      // 🔹 teraz odpytuje każdy PID po kolei
-                Thread.sleep(2000) // 🔹 odstęp między pełnymi cyklami
+                readDPFData()
+                Thread.sleep(2000)
             }
         } catch (e: Exception) {
             sendAlert("Błąd połączenia: ${e.message}")
@@ -181,38 +178,42 @@ class DPFService : Service() {
         val pidTemp = prefs.getString("pid_temp", "22F40E") ?: "22F40E"
         val pidRegen = prefs.getString("pid_regen", "22F40B") ?: "22F40B"
 
-        val pidOrder = listOf(
-            "SOOT" to pidSoot,
-            "LOAD" to pidLoad,
-            "TEMP" to pidTemp,
-            "REGEN" to pidRegen
-        )
+        // 1. Wyślij wszystkie komendy i odczytaj surowe odpowiedzi
+        val sootRaw = sendAndRead(pidSoot)
+        val loadRaw = sendAndRead(pidLoad)
+        val tempRaw = sendAndRead(pidTemp)
+        val regenRaw = sendAndRead(pidRegen)
 
-        for ((label, pid) in pidOrder) {
-            val raw = sendAndRead(pid)
+        // 2. Parsuj każdą surową odpowiedź za pomocą uniwersalnego parsera
+        //    i połącz wyniki w jedną mapę.
+        val allParsed = listOf(sootRaw, loadRaw, tempRaw, regenRaw)
+            .map { parseResponse(it) }
+            .reduce { acc, map -> acc + map }
 
-            val value: Any = when (label) {
-                "SOOT" -> parseSoot(raw)
-                "LOAD" -> parseLoad(raw)
-                "TEMP" -> parseTemp(raw)
-                "REGEN" -> parseRegen(raw)
-                else -> "---"
+        // 3. Wyślij dane do logów w UI
+        sendAlert("RAW: Soot=$sootRaw | Load=$loadRaw | Temp=$tempRaw | Regen=$regenRaw")
+        sendAlert("PARSED: $allParsed")
+
+        // 4. Wyślij przetworzone dane do UI
+        sendBroadcast(Intent("DPF_DATA").apply {
+            putExtra("CONNECTED", true)
+            putExtra("SOOT", allParsed["SOOT"] ?: "---")
+            putExtra("LOAD", allParsed["LOAD"] ?: "---")
+            putExtra("TEMP", allParsed["TEMP"] ?: "---")
+            putExtra("REGEN", allParsed["REGEN"] == "true")
+        })
+
+        // Uwaga: opóźnienie 2000ms jest w głównej pętli while, więc nie jest potrzebne tutaj.
+    }
+
+    private fun drainInputStream() {
+        Thread.sleep(200)
+        try {
+            while (inStream?.available() ?: 0 > 0) {
+                inStream?.read()
             }
-
-            sendAlert("PID $pid ($label) -> $raw  → $value")
-
-            val intent = Intent("DPF_DATA").apply {
-                putExtra("CONNECTED", true)
-                when (label) {
-                    "SOOT" -> putExtra("SOOT", value.toString())
-                    "LOAD" -> putExtra("LOAD", value.toString())
-                    "TEMP" -> putExtra("TEMP", value.toString())
-                    "REGEN" -> putExtra("REGEN", value as Boolean)
-                }
-            }
-            sendBroadcast(intent)
-
-            Thread.sleep(2000) // 🔹 mała przerwa między PID-ami
+        } catch (e: Exception) {
+            Log.e(TAG, "Błąd czyszczenia strumienia: ${e.message}")
         }
     }
 
@@ -220,7 +221,6 @@ class DPFService : Service() {
         try {
             outStream?.write((cmd + "\r").toByteArray())
             outStream?.flush()
-            Thread.sleep(80)
         } catch (e: Exception) {
             Log.e(TAG, "Błąd sendCommand: ${e.message}")
         }
@@ -234,31 +234,43 @@ class DPFService : Service() {
             val bytes = inStream?.read(buffer) ?: 0
             val raw = String(buffer, 0, bytes).trim()
             val clean = raw.replace("\r", "").replace(">", "").trim()
-
-            // 🔹 Wyślij do logów w UI (na radiu też zobaczysz w Toast)
-            sendBroadcast(Intent("DPF_ALERT").apply {
-              //  putExtra("MSG", "PID $pid -> $clean")
-            })
-
             clean
         } catch (e: Exception) {
             "---"
         }
     }
 
-    // ---- PARSERY DANYCH ----
-    // SOOT (22F40D) - ilość sadzy w gramach (2 bajty, big-endian)
+    // Uniwersalny parser, który odczytuje dane z odpowiedzi ECU.
+    // Działa na podstawie PID-u zawartego w odpowiedzi (parts[2]).
     private fun parseResponse(resp: String): Map<String, String> {
         val parts = resp.split(" ")
         if (parts.size < 3 || parts[0] != "62" || parts[1] != "F4") return emptyMap()
 
         val pid = parts[2]
         return when (pid) {
-            "0B" -> { // w odpowiedzi ECU, to co my nazwaliśmy SOOT
+            "0B" -> {
+                // To jest PID od regeneracji
                 val value = parts.getOrNull(3)?.toInt(16) ?: return emptyMap()
-                mapOf("SOOT" to "$value g")
+                // Sprawdzamy pierwszy bit. Jeśli jest 1, oznacza to, że regeneracja jest w toku.
+                mapOf("REGEN" to if ((value and 0x01) == 0x01) "true" else "false")
             }
-            "0C" -> { // ECU daje to jako TEMP
+            "0C" -> {
+                // To jest PID od obciążenia filtra (load)
+                val raw = parts.getOrNull(3)?.toInt(16) ?: return emptyMap()
+                val percent = raw * 100 / 255
+                mapOf("LOAD" to "$percent %")
+            }
+            "0D" -> {
+                // To jest PID od zapełnienia sadzą (soot)
+                if (parts.size >= 5) {
+                    val high = parts[3].toInt(16)
+                    val low = parts[4].toInt(16)
+                    val value = (high shl 8) + low
+                    mapOf("SOOT" to "$value g")
+                } else emptyMap()
+            }
+            "0E" -> {
+                // To jest PID od temperatury
                 if (parts.size >= 5) {
                     val high = parts[3].toInt(16)
                     val low = parts[4].toInt(16)
@@ -267,71 +279,7 @@ class DPFService : Service() {
                     mapOf("TEMP" to "$temp °C")
                 } else emptyMap()
             }
-            "0D" -> { // ECU daje to jako LOAD
-                val raw = parts.getOrNull(3)?.toInt(16) ?: return emptyMap()
-                val percent = raw * 100 / 255
-                mapOf("LOAD" to "$percent %")
-            }
-            "0E" -> { // w teorii REGEN, ale u Ciebie brak
-                val value = parts.getOrNull(3)?.toInt(16) ?: return emptyMap()
-                mapOf("REGEN" to if (value == 1) "true" else "false")
-            }
             else -> emptyMap()
-        }
-    }
-
-
-    private fun parseSoot(resp: String): String {
-        return try {
-            val parts = resp.chunked(2) // dzieli string co 2 znaki
-            if (parts.size >= 5 && parts[0] == "62" && parts[1] == "F4" && parts[2] == "0D") {
-                val high = parts[3].toInt(16)
-                val low = parts[4].toInt(16)
-                val value = (high shl 8) + low
-                "$value g"
-            } else "---"
-        } catch (e: Exception) {
-            "---"
-        }
-    }
-
-    // LOAD (22F40C) - procent zapełnienia filtra (1 bajt 0-255)
-    private fun parseLoad(resp: String): String {
-        return try {
-            val parts = resp.chunked(2)
-            if (parts.size >= 4 && parts[0] == "62" && parts[1] == "F4" && parts[2] == "0C") {
-                val raw = parts[3].toInt(16)
-                val percent = raw * 100 / 255
-                "$percent %"
-            } else "---"
-        } catch (e: Exception) {
-            "---"
-        }
-    }
-
-    // TEMP (22F40E) - temperatura filtra w °C (2 bajty, big-endian, offset -40)
-    private fun parseTemp(resp: String): String {
-        return try {
-            val parts = resp.chunked(2)
-            if (parts.size >= 5 && parts[0] == "62" && parts[1] == "F4" && parts[2] == "0E") {
-                val high = parts[3].toInt(16)
-                val low = parts[4].toInt(16)
-                val raw = (high shl 8) + low
-                val temp = raw - 40
-                "$temp °C"
-            } else "---"
-        } catch (e: Exception) {
-            "---"
-        }
-    }
-
-    // REGEN (22F40B) - status regeneracji (1 bajt, 0 = nie, 1 = tak)
-    private fun parseRegen(resp: String): Boolean {
-        return try {
-            val parts = resp.chunked(2)
-            parts.size >= 4 && parts[0] == "62" && parts[1] == "F4" && parts[2] == "0B" && parts[3].toInt(16) == 1
-        } catch (e: Exception) {
-            false
         }
     }
 
