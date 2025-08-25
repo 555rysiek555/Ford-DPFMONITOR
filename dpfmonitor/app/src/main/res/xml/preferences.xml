@@ -1,0 +1,58 @@
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <ListPreference
+        android:key="refresh_sec"
+        android:title="Częstotliwość odświeżania"
+        android:defaultValue="5"
+        android:entries="@array/refresh_entries"
+        android:entryValues="@array/refresh_values"
+        android:summary="Co ile sekund pobierać dane z OBD" />
+
+    <EditTextPreference
+        android:key="device_mac"
+        android:title="Adres MAC OBD"
+        android:defaultValue=""
+        android:summary="Np. 00:11:22:33:AA:BB (zostaw puste - tryb testowy)" />
+    <SwitchPreferenceCompat
+        app:key="debug_mode"
+        app:title="Tryb debugowania"
+        app:summary="Wyświetlaj komunikaty diagnostyczne na ekranie"
+        app:defaultValue="false" />
+    <SwitchPreferenceCompat
+        app:key="simulation_mode"
+        app:title="Tryb symulacji"
+        app:defaultValue="false"
+        app:summaryOn="Symulacja danych DPF jest włączona"
+        app:summaryOff="Symulacja danych DPF jest wyłączona" />
+    <!-- PID-y Focus 1.6 TDCi (domyślnie) -->
+    <EditTextPreference
+        android:key="pid_soot"
+        android:title="PID Sadzy"
+        android:defaultValue="22F40D"
+        android:summary="Poziom sadzy (g)" />
+
+    <EditTextPreference
+        android:key="pid_load"
+        android:title="PID Obciążenia DPF"
+        android:defaultValue="22F40C"
+        android:summary="Obciążenie DPF (%)" />
+
+    <EditTextPreference
+        android:key="pid_temp"
+        android:title="PID Temperatury DPF"
+        android:defaultValue="22F40E"
+        android:summary="Temperatura DPF (°C)" />
+
+    <EditTextPreference
+        android:key="pid_regen"
+        android:title="PID Regeneracji"
+        android:defaultValue="22F40B"
+        android:summary="Status wypalania (0/1)" />
+
+    <SwitchPreferenceCompat
+        android:key="voice_alerts"
+        android:title="Alerty głosowe"
+        android:defaultValue="true"
+        android:summary="Powiadomienia głosowe podczas startu i końca wypalania" />
+
+</PreferenceScreen>
